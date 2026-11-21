@@ -57,7 +57,7 @@ tr.r-exp{background:#fdecea}tr.r-d1{background:#fff3e0}tr.r-d2{background:#fffbe
 </head>
 <body>
 <header>
-  <h1>GS1 期限管理アプリ <span id="curStoreLbl" style="font-size:14px;font-weight:normal"></span></h1>
+  <h1 onclick="adminTap()" style="user-select:none">GS1 期限管理アプリ <span id="curStoreLbl" style="font-size:14px;font-weight:normal"></span></h1>
   <input id="storeNo" list="storeList" placeholder="店番" size="8" style="padding:5px" onkeydown="if(event.key==='Enter')switchStore()"><datalist id="storeList"></datalist>
   <button class="sec" onclick="switchStore()">店舗切替</button>
   <button class="sec" onclick="pickFolder()">保存先フォルダ選択</button>
@@ -511,6 +511,9 @@ function openSettings(){
   <label style="margin-top:6px">Teams通知先（メールアドレス。複数はカンマ区切り）<input id="s6" value="${esc(cfg.teamsTo)}" placeholder="c@example.co.jp"></label>
   <p class="hint">通知日以降に初めてアプリを開いたとき、その月の通知画面を表示します。アプリを開かなくても通知したい場合は、下の「カレンダー登録用ファイル」を使うと、Outlook/Teamsカレンダーで毎月その日にリマインドされます。</p>
   <div class="row"><button onclick="saveSettings()">保存</button> <button class="sec" onclick="exportIcs()">カレンダー登録用ファイル(.ics)</button> <button class="sec" onclick="closeM()">閉じる</button></div>
+  <h3 style="font-size:14px;margin:14px 0 4px">薬品マスタ</h3>
+  <p class="hint">${Object.keys(drug).length?'登録済み：'+Object.keys(drug).length.toLocaleString()+'件（'+esc(drugVer)+'）':'未登録です。本部から配布された「薬品マスタ.json」を読み込んでください。'}</p>
+  <button class="sec" onclick="$('drugJson').click()">薬品マスタ.json を読み込む</button><input id="drugJson" type="file" accept=".json,application/json" style="display:none" onchange="importDrugJson(this)">
   <h3 style="font-size:14px;margin:14px 0 4px">品名マスタ（${ms.length}件）</h3>
   <div style="max-height:150px;overflow:auto;font-size:13px">${ms.map(g=>`<div>${esc(g)} ／ ${esc(master[g])} <button class="dng sm" onclick="delMaster('${esc(g)}')">削除</button></div>`).join('')||'<span class="hint">登録なし</span>'}</div>`;
   $('modal').style.display='flex';
@@ -677,7 +680,97 @@ let drug={},drugVer='',isAdmin=false,_tap=[];
 const dmName=g=>{const v=drug[g];return v?v.split('\t')[0]:''};
 const dmYj=g=>{const v=drug[g];return v?(v.split('\t')[1]||''):''};
 function drugMsg(){const n=Object.keys(drug).length;$('drugMsg').textContent=n?'薬品マスタ '+n.toLocaleString()+'件（'+drugVer+'）':''}
-function adminTap(){}
+/*ADMIN-START*/
+async function sha(t){try{const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('gs1app:'+t));return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('')}catch(e){let h=5381;for(const c of 'gs1app:'+t)h=((h<<5)+h+c.charCodeAt(0))|0;return 'x'+h}}
+function adminTap(){const n=Date.now();_tap=_tap.filter(t=>n-t<3000);_tap.push(n);if(_tap.length>=5){_tap=[];adminLogin()}}
+async function adminLogin(){
+  if(isAdmin){adminPanel();return}
+  const h=store.get('adminHash','');
+  if(!h){
+    const a=prompt('管理者PINを新しく設定します（4文字以上）。この端末の管理者機能にのみ使われます。');if(!a)return;
+    if(a.length<4){alert('4文字以上にしてください');return}
+    if(prompt('確認のためもう一度入力してください')!==a){alert('一致しません');return}
+    store.set('adminHash',await sha(a));isAdmin=true;adminPanel();return}
+  const a=prompt('管理者PINを入力してください');if(a===null)return;
+  if(await sha(a)===h){isAdmin=true;adminPanel()}else alert('PINが違います');
+}
+function adminPanel(){
+  const n=Object.keys(drug).length;
+  $('mbox').innerHTML=`<h2>管理者メニュー</h2>
+  <h3 style="font-size:14px;margin:8px 0 4px">薬品マスタ（${n?n.toLocaleString()+'件／'+esc(drugVer):'未登録'}）</h3>
+  <p class="hint">MEDISの「医薬品HOTコードマスター（販売包装単位コード付き）」の <b>MEDISyyyymmdd_h.txt</b> を選択してください。取り込み後、保存先フォルダが接続されていれば、フォルダ直下に「薬品マスタ.json」を書き出し、他の端末は自動で読み込みます。</p>
+  <input type="file" id="mfile" accept=".txt,.TXT,.csv">
+  <div id="mstat" class="hint" style="margin:6px 0"></div>
+  <div class="row"><button onclick="importDrug()">取り込み</button>
+  <button class="sec" onclick="exportDrugJson()">配布用ファイルを保存（薬品マスタ.json）</button>
+  <button class="sec" onclick="clearDrug()">マスタを消去</button>
+  <button class="sec" onclick="changePin()">PIN変更</button>
+  <button class="sec" onclick="isAdmin=false;closeM()">管理者モード終了</button></div>`;
+  $('modal').style.display='flex';
+}
+async function changePin(){const a=prompt('新しいPIN（4文字以上）');if(!a||a.length<4)return;if(prompt('確認')!==a){alert('一致しません');return}store.set('adminHash',await sha(a));alert('変更しました')}
+function parseCsvM(t){
+  const rows=[];let r=[],f='',q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c==='"'){if(t[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;
+    else if(c===','){r.push(f);f=''}
+    else if(c==='\n'){r.push(f);rows.push(r);r=[];f=''}
+    else if(c!=='\r')f+=c}
+  if(f||r.length){r.push(f);rows.push(r)}
+  return rows;
+}
+function buildDrug(rows){
+  const h=rows[0].map(x=>x.replace(/[\s"]/g,'')),ix=k=>h.findIndex(x=>x.includes(k));
+  const iG=ix('販売包装単位コード'),iN=ix('販売名'),iS=ix('規格単位'),iY=ix('薬価基準収載医薬品コード'),iU=ix('更新区分'),iD=ix('更新年月日');
+  if(iG<0||iN<0)throw new Error('販売包装単位コード付きのファイル（MEDISyyyymmdd_h.txt）ではありません');
+  const out={},rank={};let maxd='';
+  for(let k=1;k<rows.length;k++){const r=rows[k];const g=(r[iG]||'').trim();if(!/^\d{14}$/.test(g))continue;
+    const d=(r[iD]||'').trim();if(d>maxd)maxd=d;
+    const rk=((r[iU]||'')==='1'?'1':'0')+d;
+    if(rank[g]&&rank[g]>=rk)continue;rank[g]=rk;
+    let nm=(r[iN]||'').normalize('NFKC').trim(),sp=(r[iS]||'').normalize('NFKC').trim();
+    if(sp&&!nm.includes(sp))nm+=' '+sp;
+    out[g]=nm+'\t'+((iY>=0?r[iY]:'')||'').trim()}
+  return {d:out,v:maxd};
+}
+async function importDrug(){
+  if(!isAdmin)return;
+  const f=$('mfile').files[0];if(!f){$('mstat').textContent='ファイルを選択してください';return}
+  $('mstat').textContent='読み込み中…（数秒かかります）';
+  try{
+    const buf=await f.arrayBuffer();
+    let t=new TextDecoder('shift_jis').decode(buf);
+    if(t.charCodeAt(0)===0xFEFF)t=t.slice(1);
+    const res=buildDrug(parseCsvM(t));
+    const n=Object.keys(res.d).length;if(!n)throw new Error('GTINを含む行がありません');
+    drug=res.d;drugVer='MEDIS '+res.v;
+    await idbSet('drug',{d:drug,v:drugVer});
+    let msg=n.toLocaleString()+'件を取り込みました（端末に保存）。';
+    if(root){try{if(await root.requestPermission({mode:'readwrite'})==='granted'){await writeFile(root,'薬品マスタ.json',JSON.stringify({v:drugVer,d:drug}));msg+='フォルダ「'+root.name+'」に薬品マスタ.jsonを書き出しました。'}}catch(e){msg+='フォルダ書き出し失敗：'+e.message}}
+    else msg+='保存先フォルダ未接続のため、この端末のみに保存しました。';
+    $('mstat').innerHTML='<b>'+esc(msg)+'</b>';drugMsg();
+  }catch(e){$('mstat').innerHTML='<span class="warn">取り込み失敗：'+esc(e.message)+'</span>'}
+}
+function exportDrugJson(){if(!Object.keys(drug).length){alert('先にマスタを取り込んでください');return}
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({v:drugVer,d:drug})],{type:'application/json'}));a.download='薬品マスタ.json';document.body.appendChild(a);a.click();a.remove()}
+async function clearDrug(){if(!confirm('この端末の薬品マスタを消去します（フォルダ内のファイルは消えません）'))return;drug={};drugVer='';await idbSet('drug',null);drugMsg();adminPanel()}
+/*ADMIN-END*/
+
+/* ---------- 薬品マスタ読み込み（配布用「薬品マスタ.json」を選択） ---------- */
+async function importDrugJson(el){
+  const f=el.files[0];el.value='';if(!f)return;
+  try{
+    const j=JSON.parse((await f.text()).replace(/^﻿/,''));
+    const ks=j&&j.d?Object.keys(j.d):[];
+    if(!ks.length||!/^\d{14}$/.test(ks[0])||typeof j.d[ks[0]]!=='string')throw new Error('薬品マスタ.json ではありません（本部から配布されたファイルを選んでください）');
+    const nv=j.v||'';
+    if(drugVer&&nv&&nv<drugVer&&!confirm('選んだファイル（'+nv+'）は、現在の薬品マスタ（'+drugVer+'）より古い版です。\nそれでも読み込みますか？'))return;
+    drug=j.d;drugVer=nv;await idbSet('drug',{d:drug,v:drugVer});drugMsg();
+    alert('薬品マスタを読み込みました：'+ks.length.toLocaleString()+'件（'+(nv||'版不明')+'）');
+    if(typeof openSettings==='function'&&$('modal').style.display==='flex')openSettings();
+  }catch(e){alert('読み込めませんでした：'+e.message)}
+}
 async function loadDrug(){
   const c=await idbGet('drug');if(c&&c.d){drug=c.d;drugVer=c.v||''}
   if(root){try{if(await root.queryPermission({mode:'read'})==='granted'||await root.queryPermission({mode:'readwrite'})==='granted'){
